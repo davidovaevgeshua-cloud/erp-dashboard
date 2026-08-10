@@ -25,6 +25,10 @@ daily = figs["daily"]
 last = daily.iloc[-1]
 last_date = daily["date"].max()
 
+MSK = dt.timezone(dt.timedelta(hours=3))
+built_at = dt.datetime.now(dt.timezone.utc).astimezone(MSK)
+SCHEDULE = "по будням в 18:30 МСК"
+
 CFG = {"displaylogo": False, "responsive": True,
        "modeBarButtonsToRemove": ["lasso2d", "select2d"]}
 
@@ -59,6 +63,7 @@ html = f"""<!DOCTYPE html>
   .wrap {{ max-width:1180px; margin:0 auto; padding:0 24px; }}
   header h1 {{ margin:0 0 6px; font-size:26px; font-weight:600; }}
   header p {{ margin:0; color:#94a3b8; font-size:14px; }}
+  header p.sched {{ margin-top:6px; font-size:13px; color:#a3b2c4; }}
   .cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
             gap:14px; margin:24px 0 8px; }}
   .card {{ background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px 18px; }}
@@ -76,7 +81,8 @@ html = f"""<!DOCTYPE html>
 <body>
 <header><div class="wrap">
   <h1>ERP и P/E индекса Мосбиржи</h1>
-  <p>Данные на {last_date:%d.%m.%Y} · обновление: {status}</p>
+  <p>Данные на {last_date:%d.%m.%Y} · страница пересобрана {built_at:%d.%m.%Y %H:%M} МСК</p>
+  <p class="sched">Автообновление {SCHEDULE} · результат последнего запуска: {status}</p>
 </div></header>
 <div class="wrap">
   <div class="cards">{cards_html}</div>
@@ -109,7 +115,8 @@ html = f"""<!DOCTYPE html>
   </section>
 </div>
 <footer>Источник данных: MOEX ISS API (свечи IMOEX и кривая бескупонной доходности).
-  Сборка {dt.datetime.now():%d.%m.%Y %H:%M} UTC.</footer>
+  Автообновление {SCHEDULE}; новые точки появляются только по торговым дням.
+  Сборка {built_at:%d.%m.%Y %H:%M} МСК.</footer>
 </body>
 </html>
 """
