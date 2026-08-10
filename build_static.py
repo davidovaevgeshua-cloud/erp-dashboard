@@ -12,13 +12,21 @@ DOCS = os.path.join(BASE, "docs")
 os.makedirs(DOCS, exist_ok=True)
 
 status = "данные из репозитория"
+unchanged = False
 if "--no-update" not in sys.argv:
     try:
         df, msg = core.update_from_moex(core.load_daily())
         status = msg
+        unchanged = msg.startswith("Данные актуальны")
     except Exception as exc:  # noqa: BLE001
         status = f"обновление с MOEX не выполнено ({exc}), показаны сохранённые данные"
 print("STATUS:", status)
+
+# если данные не изменились — не трогаем HTML, чтобы не плодить пустые коммиты
+if unchanged and "--force" not in sys.argv and \
+        os.path.exists(os.path.join(DOCS, "index.html")):
+    print("SKIP: пересборка не требуется")
+    sys.exit(0)
 
 figs = core.build_figures()
 daily = figs["daily"]
@@ -27,7 +35,7 @@ last_date = daily["date"].max()
 
 MSK = dt.timezone(dt.timedelta(hours=3))
 built_at = dt.datetime.now(dt.timezone.utc).astimezone(MSK)
-SCHEDULE = "по будням в 18:30 МСК"
+SCHEDULE = "каждые 2 часа в торговые часы, 9:50–19:30 МСК, по будням"
 
 CFG = {"displaylogo": False, "responsive": True,
        "modeBarButtonsToRemove": ["lasso2d", "select2d"]}

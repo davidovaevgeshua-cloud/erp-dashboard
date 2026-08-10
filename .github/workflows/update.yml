@@ -2,9 +2,17 @@ name: Обновление данных дашборда
 
 on:
   schedule:
-    # 18:30 МСК = 15:30 UTC, по будням
-    - cron: "30 15 * * 1-5"
+    # Время указано в UTC; МСК = UTC+3. Только по будням (1-5).
+    # 09:50, 11:50, 13:50, 15:50, 17:50 МСК — каждые 2 часа в торговую сессию
+    - cron: "50 6,8,10,12,14 * * 1-5"
+    # 19:30 МСК — закрепляющий запуск после основной сессии
+    - cron: "30 16 * * 1-5"
   workflow_dispatch:
+
+# параллельные запуски не нужны: они конфликтуют при пуше в main
+concurrency:
+  group: dashboard-update
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -32,8 +40,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/index.html erp_daily.csv erp_quarterly.csv pe_quarterly.csv
           if git diff --staged --quiet; then
-            echo "Изменений нет"
-          else
-            git commit -m "Автообновление данных MOEX $(date -u +%Y-%m-%d)"
-            git push
+            echo "Данные не изменились — коммит не нужен"
+            exit 0
           fi
+          git commit -m "Данные MOEX на $(TZ=Europe/Moscow date +'%d.%m.%Y %H:%M') МСК"
+          # на случай, если параллельный запуск уже успел запушить
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin main && git push origin main && exit 0
+            sleep 5
+          done
+          exit 1

@@ -19,6 +19,7 @@ PE_Q_CSV = os.path.join(BASE, "pe_quarterly.csv")
 EPS_FORWARD = {2025: 760, 2026: 590}
 PE_BENCH = 6.2  # средний P/E 2016-2018
 
+MSK = dt.timezone(dt.timedelta(hours=3))
 ISS = "https://iss.moex.com/iss"
 HEADERS = {"User-Agent": "Mozilla/5.0 (erp-dashboard)"}
 TIMEOUT = 30
@@ -101,57 +102,99 @@ def nelson_siegel_5y(params: dict) -> float:
     return g
 
 
-def fetch_ofz5y(date: dt.date) -> float | None:
-    js = _iss_get(f"{ISS}/history/engines/stock/zcyc.json",
-                  {"date": date.isoformat(), "iss.meta": "off"})
-    block = js.get("yearyields") or js.get("params") or {}
+def _yield_from_block(block: dict) -> tuple[float | None, str | None]:
+    """Извлекает доходность на сроке 5 лет из блока ответа ISS."""
     cols, data = block.get("columns", []), block.get("data", [])
     if not data:
-        return None
-    rec = dict(zip(cols, data[-1]))
-    if all(k in rec for k in ("B1", "B2", "B3", "T1")):
-        return nelson_siegel_5y(rec)
-    # запасной путь: таблица доходностей по срокам
+        return None, None
+    # готовая таблица доходностей по срокам — приоритетный источник
     for row in data:
-        r = dict(zip(cols, row))
-        if abs(float(r.get("period", 0)) - 5) < 1e-6:
-            return float(r.get("value"))
-    return None
+        r = {k.lower(): v for k, v in zip(cols, row)}
+        if "period" in r and abs(float(r["period"]) - 5) < 1e-6:
+            return float(r["value"]), r.get("tradetime")
+    # иначе — расчёт по параметрам Нельсона–Сигела
+    r = {k.upper(): v for k, v in zip(cols, data[-1])}
+    if all(k in r for k in ("B1", "B2", "B3", "T1")):
+        return nelson_siegel_5y(r), str(r.get("TRADETIME") or "")
+    return None, None
+
+
+def fetch_ofz5y(date: dt.date, realtime: bool = False) -> tuple[float | None, str | None]:
+    """Доходность КБД на сроке 5 лет. realtime — текущая кривая торгового дня."""
+    if realtime:
+        js = _iss_get(f"{ISS}/engines/stock/zcyc.json", {"iss.meta": "off"})
+        # сверяем дату кривой с запрошенной, чтобы не взять вчерашнюю
+        for name in ("yearyields", "params"):
+            blk = js.get(name, {})
+            if blk.get("data"):
+                td = dict(zip(blk["columns"], blk["data"][0])).get("tradedate")
+                if td and str(td)[:10] != date.isoformat():
+                    return None, None
+                val, tm = _yield_from_block(blk)
+                if val is not None:
+                    return val, tm
+        return None, None
+    js = _iss_get(f"{ISS}/history/engines/stock/zcyc.json",
+                  {"date": date.isoformat(), "iss.meta": "off"})
+    for name in ("yearyields", "params"):
+        val, tm = _yield_from_block(js.get(name, {}))
+        if val is not None:
+            return val, tm
+    return None, None
 
 
 def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
-    """Догружает новые торговые дни с MOEX и пересчитывает ERP / P/E."""
+    """Догружает новые дни и переписывает текущий торговый день внутри сессии."""
     last = df["date"].max().date()
-    start = (last + dt.timedelta(days=1)).isoformat()
+    today = dt.datetime.now(MSK).date()
+    # старт с последней сохранённой даты включительно — чтобы обновить незакрытый день
     try:
-        new = fetch_imoex(start)
+        new = fetch_imoex(last.isoformat())
     except Exception as exc:  # noqa: BLE001
         return df, f"Ошибка загрузки IMOEX: {exc}"
-    new = new[new["date"] > pd.Timestamp(last)] if len(new) else new
     if new is None or len(new) == 0:
-        return df, f"Новых торговых дней после {last.strftime('%d.%m.%Y')} нет"
-    recs, errors = [], 0
+        return df, f"MOEX не вернул свечей после {last:%d.%m.%Y}"
+
+    old_map = df.set_index(df["date"].dt.date)[["imoex", "ofz5y"]].to_dict("index")
+    recs, stamp, added, changed = [], None, 0, 0
     for _, row in new.iterrows():
         d = row["date"].date()
         try:
-            y = fetch_ofz5y(d)
+            y, tm = fetch_ofz5y(d, realtime=(d == today))
         except Exception:  # noqa: BLE001
-            y, errors = None, errors + 1
+            y, tm = None, None
         if y is None:
             continue
+        prev = old_map.get(d)
+        if prev is not None:
+            same = (abs(prev["imoex"] - row["imoex"]) < 1e-6
+                    and abs(prev["ofz5y"] - y) < 1e-9)
+            if same:
+                continue
+            changed += 1
+        else:
+            added += 1
+        if d == today and tm:
+            stamp = str(tm)[:5]
         eps = EPS_FORWARD.get(d.year, list(EPS_FORWARD.values())[-1])
         coe = eps / row["imoex"]
         recs.append({"date": row["date"], "imoex": row["imoex"], "ofz5y": y,
                      "eps_fwd": eps, "coe": coe, "erp": coe - y / 100.0,
                      "pe": row["imoex"] / eps})
     if not recs:
-        return df, "Новые свечи получены, но кривая КБД недоступна"
+        return df, f"Данные актуальны, изменений нет (последняя дата {last:%d.%m.%Y})"
+    # новые строки идут после старых, keep="last" — это и есть upsert
     out = pd.concat([df, pd.DataFrame(recs)], ignore_index=True)
-    out = out.drop_duplicates("date").sort_values("date").reset_index(drop=True)
+    out = (out.drop_duplicates("date", keep="last")
+              .sort_values("date").reset_index(drop=True))
     out.to_csv(DAILY_CSV, index=False)
     rebuild_bars(out)
-    msg = f"Добавлено дней: {len(recs)}, последняя дата {out['date'].max():%d.%m.%Y}"
-    return out, msg
+    parts = []
+    if added:
+        parts.append(f"добавлено дней: {added}")
+    if changed:
+        parts.append(f"пересчитан текущий день" + (f" на {stamp} МСК" if stamp else ""))
+    return out, ", ".join(parts) + f"; последняя дата {out['date'].max():%d.%m.%Y}"
 
 
 def rebuild_bars(daily: pd.DataFrame) -> None:
