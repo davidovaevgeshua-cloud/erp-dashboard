@@ -22,7 +22,8 @@ PE_BENCH = 6.2  # средний P/E 2016-2018
 MSK = dt.timezone(dt.timedelta(hours=3))
 ISS = "https://iss.moex.com/iss"
 HEADERS = {"User-Agent": "Mozilla/5.0 (erp-dashboard)"}
-TIMEOUT = 30
+TIMEOUT = 45
+RETRIES = 5
 
 COL_IMOEX = "#2563eb"
 COL_OFZ = "#d97706"
@@ -30,6 +31,15 @@ COL_ERP = "#059669"
 COL_PE = "#7c3aed"
 COL_MEAN = "#dc2626"
 COL_MED = "#059669"
+COL_DYN = "#1f2937"  # медиана выбранного диапазона
+
+
+def legend_text(base: str, med: str, n: int) -> str:
+    """Подпись под дневным графиком: статичный ориентир плюс медиана выбранного периода."""
+    return (f'{base}&nbsp;&nbsp;&nbsp;&nbsp;'
+            f'<span style="color:{COL_DYN}">—·— Медиана за выбранный период: '
+            f'{med} ({n} дн.)</span>')
+
 
 RANGE_BUTTONS = dict(buttons=[
     dict(count=1, label="1М", step="month", stepmode="backward"),
@@ -55,16 +65,18 @@ def load_daily() -> pd.DataFrame:
 
 
 def _iss_get(url: str, params: dict) -> dict:
+    """Запрос к ISS с повторами: таймауты биржи — штатная ситуация."""
+    import time
     last = None
-    for attempt in range(3):
+    for attempt in range(RETRIES):
         try:
             r = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
             r.raise_for_status()
             return r.json()
         except Exception as exc:  # noqa: BLE001
             last = exc
-            import time
-            time.sleep(1.5 * (attempt + 1))
+            if attempt < RETRIES - 1:
+                time.sleep(2.0 * (attempt + 1))
     raise RuntimeError(f"MOEX ISS недоступен: {last}")
 
 
@@ -287,6 +299,9 @@ def fig_daily_erp(df: pd.DataFrame) -> go.Figure:
         hovertemplate="%{x|%d.%m.%Y}<br>ERP: %{y:.2f}%<extra></extra>"))
     mean_hist = 8.92
     fig.add_hline(y=mean_hist, line=dict(color=COL_MEAN, width=1.2, dash="dash"))
+    # вторая линия — медиана выбранного диапазона, пересчитывается в браузере
+    med_all = float((df["erp"] * 100).median())
+    fig.add_hline(y=med_all, line=dict(color=COL_DYN, width=1.4, dash="dashdot"))
     fig.update_layout(
         **LAYOUT,
         title=dict(text="Форвардный ERP по дням, %", x=0.01, font=dict(size=18)),
@@ -295,8 +310,11 @@ def fig_daily_erp(df: pd.DataFrame) -> go.Figure:
         yaxis=dict(title="ERP, %", ticksuffix="%"),
         height=520, showlegend=False)
     fig.add_annotation(x=0.01, y=-0.30, xref="paper", yref="paper", showarrow=False,
-                       align="left", font=dict(size=11, color=COL_MEAN),
-                       text=f"— — Историческое среднее 2014–2025: {mean_hist:.2f}%")
+                       align="left", font=dict(size=11),
+                       text=legend_text(
+                           f'<span style="color:{COL_MEAN}">— — Историческое среднее '
+                           f'2014–2025: {mean_hist:.2f}%</span>',
+                           f"{med_all:.2f}%", len(df)))
     return fig
 
 
@@ -307,6 +325,8 @@ def fig_daily_pe(df: pd.DataFrame) -> go.Figure:
         line=dict(color=COL_PE, width=2),
         hovertemplate="%{x|%d.%m.%Y}<br>P/E: %{y:.2f}<extra></extra>"))
     fig.add_hline(y=PE_BENCH, line=dict(color=COL_MED, width=1.2, dash="dot"))
+    med_all = float(df["pe"].median())
+    fig.add_hline(y=med_all, line=dict(color=COL_DYN, width=1.4, dash="dashdot"))
     lo = min(df["pe"].min() * 0.96, PE_BENCH * 0.95)
     hi = max(df["pe"].max() * 1.04, PE_BENCH * 1.06)
     fig.update_layout(
@@ -317,8 +337,11 @@ def fig_daily_pe(df: pd.DataFrame) -> go.Figure:
         yaxis=dict(title="P/E", range=[lo, hi]),
         height=520, showlegend=False)
     fig.add_annotation(x=0.01, y=-0.30, xref="paper", yref="paper", showarrow=False,
-                       align="left", font=dict(size=11, color=COL_MED),
-                       text=f"···· Средний P/E 2016–2018: {PE_BENCH}")
+                       align="left", font=dict(size=11),
+                       text=legend_text(
+                           f'<span style="color:{COL_MED}">···· Средний P/E '
+                           f'2016–2018: {PE_BENCH}</span>',
+                           f"{med_all:.2f}", len(df)))
     return fig
 
 

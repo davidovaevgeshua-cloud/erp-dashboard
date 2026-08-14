@@ -1,4 +1,5 @@
 """Пересобирает docs/index.html со свежими данными MOEX (фолбэк — сохранённые CSV)."""
+import json
 import os
 import sys
 import datetime as dt
@@ -18,8 +19,13 @@ if "--no-update" not in sys.argv:
         df, msg = core.update_from_moex(core.load_daily())
         status = msg
         unchanged = msg.startswith("Данные актуальны")
+        # биржа не ответила — данные не менялись, страницу не трогаем
+        if msg.startswith(("Ошибка загрузки", "MOEX не вернул")):
+            print("WARN:", msg)
+            status, unchanged = "данные из репозитория", True
     except Exception as exc:  # noqa: BLE001
-        status = f"обновление с MOEX не выполнено ({exc}), показаны сохранённые данные"
+        print("WARN:", exc)
+        status, unchanged = "данные из репозитория", True
 print("STATUS:", status)
 
 # если данные не изменились — не трогаем HTML, чтобы не плодить пустые коммиты
@@ -41,9 +47,28 @@ CFG = {"displaylogo": False, "responsive": True,
        "modeBarButtonsToRemove": ["lasso2d", "select2d"]}
 
 
-def div(fig, first=False):
+def div(fig, first=False, div_id=None):
     return pio.to_html(fig, include_plotlyjs="cdn" if first else False,
-                       full_html=False, config=CFG)
+                       full_html=False, config=CFG, div_id=div_id)
+
+
+# конфигурация динамической медианы для дневных графиков
+ts = [int(t.timestamp() * 1000) for t in daily["date"]]
+median_cfg = json.dumps([
+    {"id": "erp_daily", "suffix": "%", "t": ts,
+     "v": [round(v * 100, 6) for v in daily["erp"]],
+     "base": f'<span style="color:{core.COL_MEAN}">— — Историческое среднее '
+             f'2014–2025: 8.92%</span>'},
+    {"id": "pe_daily", "suffix": "", "t": ts,
+     "v": [round(v, 6) for v in daily["pe"]],
+     "base": f'<span style="color:{core.COL_MED}">···· Средний P/E '
+             f'2016–2018: {core.PE_BENCH}</span>'},
+], ensure_ascii=False)
+
+with open(os.path.join(BASE, "median_range.js"), encoding="utf-8") as f:
+    median_js = (f.read().replace("__CFG__", median_cfg)
+                 .replace("__DYN__", core.COL_DYN))
+median_js = f"<script>\n{median_js}\n</script>"
 
 
 cards = [
@@ -98,21 +123,25 @@ html = f"""<!DOCTYPE html>
   <section>
     <h2>Раздел 1. Форвардный ERP</h2>
     <p class="sub">ERP = EPS<sub>fwd</sub> / IMOEX − доходность ОФЗ 5Y. Таймфрейм сужается
-       кнопками, ползунком под графиком или выделением мышью.</p>
-    {div(figs['erp_daily'], first=True)}
+       кнопками, ползунком под графиком или выделением мышью;
+       медиана пересчитывается по выбранному диапазону.</p>
+    {div(figs['erp_daily'], first=True, div_id='erp_daily')}
     {div(figs['erp_bar'])}
     <p class="note">Годы 2014–2025 — исторические значения; кварталы 2026 рассчитаны как
        среднее дневных значений; «Сейчас» — ERP на последнюю доступную дату.
-       Среднее и медиана считаются только по завершённым годам 2014–2025.</p>
+       Среднее и медиана на столбчатом графике считаются только по завершённым
+       годам 2014–2025. На дневном графике тёмная штрихпунктирная линия — медиана
+       по той части ряда, которая видна в выбранном диапазоне.</p>
   </section>
 
   <section>
     <h2>Раздел 2. P/E индекса</h2>
     <p class="sub">P/E = IMOEX / EPS<sub>fwd</sub> — рассчитывается из тех же данных и
        обновляется вместе с ERP.</p>
-    {div(figs['pe_daily'])}
+    {div(figs['pe_daily'], div_id='pe_daily')}
     {div(figs['pe_bar'])}
-    <p class="note">Зелёная линия на дневном графике — средний P/E 2016–2018 ({core.PE_BENCH}).</p>
+    <p class="note">Зелёная пунктирная линия на дневном графике — средний P/E 2016–2018
+       ({core.PE_BENCH}); тёмная штрихпунктирная — медиана выбранного диапазона.</p>
   </section>
 
   <section>
@@ -125,6 +154,7 @@ html = f"""<!DOCTYPE html>
 <footer>Источник данных: MOEX ISS API (свечи IMOEX и кривая бескупонной доходности).
   Автообновление {SCHEDULE}; новые точки появляются только по торговым дням.
   Сборка {built_at:%d.%m.%Y %H:%M} МСК.</footer>
+{median_js}
 </body>
 </html>
 """
