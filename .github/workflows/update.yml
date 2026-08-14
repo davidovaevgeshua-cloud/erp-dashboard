@@ -34,6 +34,10 @@ jobs:
       - name: Пересборка дашборда
         run: python build_static.py
 
+      # если в данных аномалии — коммита не будет, на сайте останется рабочая версия
+      - name: Проверка данных
+        run: python selfcheck.py
+
       - name: Коммит изменений
         run: |
           git config user.name "github-actions[bot]"

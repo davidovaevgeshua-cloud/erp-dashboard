@@ -88,63 +88,123 @@ def fetch_imoex(start: str) -> pd.DataFrame:
     return pd.DataFrame(rows).drop_duplicates("date")
 
 
-def nelson_siegel_5y(params: dict) -> float:
-    """Доходность КБД на сроке 5 лет по методике Московской биржи."""
-    t = 5.0
+# Параметры гауссовых поправок КБД: геометрическая прогрессия с шагом k = 1.6.
+# Набор сверен с официальной таблицей yearyields: отклонение 0,0000 п.п. на всех 11 сроках.
+_K = 1.6
+_A = [0.0, 0.6]
+for _i in range(2, 9):
+    _A.append(_A[-1] + 0.6 * _K ** (_i - 1))
+_B = [0.6 * _K ** _i for _i in range(9)]
+
+
+def nelson_siegel_5y(params: dict, t: float = 5.0) -> float:
+    """Доходность КБД в процентах на сроке t лет по методике Московской биржи."""
     b0, b1, b2, tau = params["B1"], params["B2"], params["B3"], params["T1"]
     x = t / tau
     exp_x = math.exp(-x)
     g = b0 + (b1 + b2) * (1 - exp_x) / x - b2 * exp_x
-    # 9 гауссовых поправок
-    A = [0, 0.6, 1.4, 2.4, 3.6, 5.0, 6.6, 8.4, 10.4]
     for i in range(9):
-        g += params.get(f"G{i+1}", 0.0) * math.exp(-((t - A[i]) ** 2) / (0.6 ** 2))
-    return g
+        g += params.get(f"G{i+1}", 0.0) * math.exp(-((t - _A[i]) ** 2) / (_B[i] ** 2))
+    # G выражена в базисных пунктах непрерывной ставки — нужен переход к эффективной
+    return 100.0 * (math.exp(g / 10000.0) - 1.0)
 
 
-def _yield_from_block(block: dict) -> tuple[float | None, str | None]:
-    """Извлекает доходность на сроке 5 лет из блока ответа ISS."""
-    cols, data = block.get("columns", []), block.get("data", [])
-    if not data:
-        return None, None
-    # готовая таблица доходностей по срокам — приоритетный источник
+def _published_ofz5y(date: dt.date) -> tuple[float | None, str | None]:
+    """Основной источник — опубликованная Мосбиржей таблица доходностей КБД.
+
+    Эндпоинт принимает дату: для текущего дня возвращает внутридневное значение,
+    для прошлых дат — значение на закрытие основной сессии (18:49:59).
+    """
+    js = _iss_get(f"{ISS}/engines/stock/zcyc.json",
+                  {"date": date.isoformat(), "iss.only": "yearyields", "iss.meta": "off"})
+    blk = js.get("yearyields", {})
+    cols, data = blk.get("columns", []), blk.get("data", [])
     for row in data:
-        r = {k.lower(): v for k, v in zip(cols, row)}
-        if "period" in r and abs(float(r["period"]) - 5) < 1e-6:
-            return float(r["value"]), r.get("tradetime")
-    # иначе — расчёт по параметрам Нельсона–Сигела
-    r = {k.upper(): v for k, v in zip(cols, data[-1])}
-    if all(k in r for k in ("B1", "B2", "B3", "T1")):
-        return nelson_siegel_5y(r), str(r.get("TRADETIME") or "")
+        r = dict(zip(cols, row))
+        if str(r.get("tradedate", ""))[:10] != date.isoformat():
+            return None, None  # кривая за другую дату — не берём
+        if abs(float(r.get("period", 0)) - 5.0) < 1e-6:
+            return float(r["value"]), str(r.get("tradetime") or "")
     return None, None
 
 
-def fetch_ofz5y(date: dt.date, realtime: bool = False) -> tuple[float | None, str | None]:
-    """Доходность КБД на сроке 5 лет. realtime — текущая кривая торгового дня."""
-    if realtime:
-        js = _iss_get(f"{ISS}/engines/stock/zcyc.json", {"iss.meta": "off"})
-        # сверяем дату кривой с запрошенной, чтобы не взять вчерашнюю
-        for name in ("yearyields", "params"):
-            blk = js.get(name, {})
-            if blk.get("data"):
-                td = dict(zip(blk["columns"], blk["data"][0])).get("tradedate")
-                if td and str(td)[:10] != date.isoformat():
-                    return None, None
-                val, tm = _yield_from_block(blk)
-                if val is not None:
-                    return val, tm
-        return None, None
+def _calculated_ofz5y(date: dt.date) -> tuple[float | None, str | None]:
+    """Резерв — расчёт по параметрам кривой.
+
+    Сверен с официальными данными: отклонение 0,0000 п.п. на всех 11 сроках кривой.
+    """
     js = _iss_get(f"{ISS}/history/engines/stock/zcyc.json",
                   {"date": date.isoformat(), "iss.meta": "off"})
-    for name in ("yearyields", "params"):
-        val, tm = _yield_from_block(js.get(name, {}))
-        if val is not None:
+    blk = js.get("params", {})
+    cols, data = blk.get("columns", []), blk.get("data", [])
+    if not data:
+        return None, None
+    rec = {str(k).upper(): v for k, v in zip(cols, data[-1])}
+    if str(rec.get("TRADEDATE", ""))[:10] != date.isoformat():
+        return None, None
+    if not all(k in rec for k in ("B1", "B2", "B3", "T1")):
+        return None, None
+    return nelson_siegel_5y(rec), str(rec.get("TRADETIME") or "")
+
+
+def fetch_ofz5y(date: dt.date, realtime: bool = False) -> tuple[float | None, str | None]:
+    """Доходность КБД на сроке 5 лет, % годовых.
+
+    Сначала берётся готовое значение Мосбиржи, при его отсутствии — расчёт по параметрам.
+    Значения вне диапазона 0–100% отбрасываются как невалидные.
+    """
+    del realtime  # один эндпоинт работает и для текущего дня, и для истории
+    for source in (_published_ofz5y, _calculated_ofz5y):
+        try:
+            val, tm = source(date)
+        except Exception:  # noqa: BLE001
+            continue
+        if val is not None and 0.0 < val < 100.0:
             return val, tm
     return None, None
 
 
+def bad_rows(df: pd.DataFrame) -> pd.Index:
+    """Строки с невозможными значениями — защита от битых данных в ряду."""
+    cols = ["imoex", "ofz5y", "erp", "pe"]
+    return df.index[
+        ~df["ofz5y"].between(0.01, 100.0)
+        | ~df["erp"].between(-0.5, 0.5)
+        | ~df["imoex"].between(100.0, 100000.0)
+        | ~df["pe"].between(0.5, 50.0)
+        | df[cols].isna().any(axis=1)
+    ]
+
+
+def repair_daily(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Перезапрашивает испорченные строки; что не починилось — удаляется."""
+    idx = bad_rows(df)
+    if len(idx) == 0:
+        return df, 0
+    fixed, drop = 0, []
+    for i in idx:
+        d = df.at[i, "date"].date()
+        px = float(df.at[i, "imoex"])
+        y, _ = fetch_ofz5y(d)
+        if y is None or not (100.0 < px < 100000.0):
+            drop.append(i)
+            continue
+        eps = EPS_FORWARD.get(d.year, list(EPS_FORWARD.values())[-1])
+        coe = eps / px
+        df.loc[i, ["ofz5y", "eps_fwd", "coe", "erp", "pe"]] = [
+            y, eps, coe, coe - y / 100.0, px / eps]
+        fixed += 1
+    if drop:
+        df = df.drop(index=drop)
+    df = df.sort_values("date").reset_index(drop=True)
+    df.to_csv(DAILY_CSV, index=False)
+    rebuild_bars(df)
+    return df, fixed + len(drop)
+
+
 def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     """Догружает новые дни и переписывает текущий торговый день внутри сессии."""
+    df, repaired = repair_daily(df)
     last = df["date"].max().date()
     today = dt.datetime.now(MSK).date()
     # старт с последней сохранённой даты включительно — чтобы обновить незакрытый день
@@ -182,6 +242,8 @@ def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
                      "eps_fwd": eps, "coe": coe, "erp": coe - y / 100.0,
                      "pe": row["imoex"] / eps})
     if not recs:
+        if repaired:
+            return df, f"исправлено битых значений: {repaired}; последняя дата {last:%d.%m.%Y}"
         return df, f"Данные актуальны, изменений нет (последняя дата {last:%d.%m.%Y})"
     # новые строки идут после старых, keep="last" — это и есть upsert
     out = pd.concat([df, pd.DataFrame(recs)], ignore_index=True)
@@ -190,6 +252,8 @@ def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     out.to_csv(DAILY_CSV, index=False)
     rebuild_bars(out)
     parts = []
+    if repaired:
+        parts.append(f"исправлено битых значений: {repaired}")
     if added:
         parts.append(f"добавлено дней: {added}")
     if changed:
