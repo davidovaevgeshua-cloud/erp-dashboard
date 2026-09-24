@@ -15,8 +15,47 @@ DAILY_CSV = os.path.join(BASE, "erp_daily.csv")
 ERP_Q_CSV = os.path.join(BASE, "erp_quarterly.csv")
 PE_Q_CSV = os.path.join(BASE, "pe_quarterly.csv")
 
-# Форвардный EPS индекса Мосбиржи по годам — при смене прогноза правится здесь
-EPS_FORWARD = {2025: 760, 2026: 590}
+# Форвардный EPS индекса Мосбиржи: история ревизий прогноза.
+# Каждая ревизия действует с указанной даты до следующей; внутри ревизии EPS
+# выбирается по году наблюдения. "*" — одно значение для любого года.
+# Новый прогноз — добавить строку в конец списка с датой, с которой он действует.
+EPS_REVISIONS = [
+    ("2025-01-01", {"*": 760}),
+    ("2025-02-19", {"*": 715}),
+    ("2025-04-09", {"*": 620}),
+    ("2025-06-26", {"*": 625}),
+    ("2025-10-01", {"*": 610}),
+    ("2025-11-12", {"*": 565}),
+    ("2026-03-25", {"*": 670}),
+    ("2026-06-04", {"*": 650}),
+    ("2026-06-22", {"*": 625}),
+    ("2026-06-26", {"*": 590}),
+    ("2026-09-24", {2026: 595, 2027: 615, 2028: 745}),
+]
+
+
+def eps_for(d) -> float:
+    """Форвардный EPS, действовавший на дату d, для года этой даты."""
+    iso = d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+    rev = EPS_REVISIONS[0][1]
+    for start, values in EPS_REVISIONS:
+        if start <= iso[:10]:
+            rev = values
+    year = int(iso[:4])
+    if year in rev:
+        return float(rev[year])
+    if "*" in rev:
+        return float(rev["*"])
+    years = sorted(k for k in rev if isinstance(k, int))
+    return float(rev[max((y for y in years if y <= year), default=years[0])])
+
+
+def current_eps_forecast() -> dict:
+    """Последняя ревизия прогноза — для подписи на странице."""
+    start, values = EPS_REVISIONS[-1]
+    return {"from": start, "values": values}
+
+
 PE_BENCH = 6.2  # средний P/E 2016-2018
 
 MSK = dt.timezone(dt.timedelta(hours=3))
@@ -201,7 +240,7 @@ def repair_daily(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         if y is None or not (100.0 < px < 100000.0):
             drop.append(i)
             continue
-        eps = EPS_FORWARD.get(d.year, list(EPS_FORWARD.values())[-1])
+        eps = eps_for(d)
         coe = eps / px
         df.loc[i, ["ofz5y", "eps_fwd", "coe", "erp", "pe"]] = [
             y, eps, coe, coe - y / 100.0, px / eps]
@@ -227,7 +266,7 @@ def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     if new is None or len(new) == 0:
         return df, f"MOEX не вернул свечей после {last:%d.%m.%Y}"
 
-    old_map = df.set_index(df["date"].dt.date)[["imoex", "ofz5y"]].to_dict("index")
+    old_map = df.set_index(df["date"].dt.date)[["imoex", "ofz5y", "eps_fwd"]].to_dict("index")
     recs, stamp, added, changed = [], None, 0, 0
     for _, row in new.iterrows():
         d = row["date"].date()
@@ -240,7 +279,8 @@ def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         prev = old_map.get(d)
         if prev is not None:
             same = (abs(prev["imoex"] - row["imoex"]) < 1e-6
-                    and abs(prev["ofz5y"] - y) < 1e-9)
+                    and abs(prev["ofz5y"] - y) < 1e-9
+                    and abs(prev["eps_fwd"] - eps_for(d)) < 1e-9)
             if same:
                 continue
             changed += 1
@@ -248,7 +288,7 @@ def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
             added += 1
         if d == today and tm:
             stamp = str(tm)[:5]
-        eps = EPS_FORWARD.get(d.year, list(EPS_FORWARD.values())[-1])
+        eps = eps_for(d)
         coe = eps / row["imoex"]
         recs.append({"date": row["date"], "imoex": row["imoex"], "ofz5y": y,
                      "eps_fwd": eps, "coe": coe, "erp": coe - y / 100.0,

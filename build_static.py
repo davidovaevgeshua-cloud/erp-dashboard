@@ -71,6 +71,12 @@ with open(os.path.join(BASE, "median_range.js"), encoding="utf-8") as f:
 median_js = f"<script>\n{median_js}\n</script>"
 
 
+_fc = core.current_eps_forecast()
+eps_line = ("Прогноз EPS<sub>fwd</sub> с " + dt.date.fromisoformat(_fc["from"]).strftime("%d.%m.%Y") + ": "
+            + ", ".join(f"{y} — {v}" for y, v in _fc["values"].items())
+            + f"; на последнюю дату в расчёте {core.eps_for(last_date.date()):.0f}.")
+
+
 cards = [
     ("ERP на последнюю дату", f"{last['erp']*100:.2f}%"),
     ("P/E индекса", f"{last['pe']:.2f}"),
@@ -137,7 +143,7 @@ html = f"""<!DOCTYPE html>
   <section>
     <h2>Раздел 2. P/E индекса</h2>
     <p class="sub">P/E = IMOEX / EPS<sub>fwd</sub> — рассчитывается из тех же данных и
-       обновляется вместе с ERP.</p>
+       обновляется вместе с ERP. {eps_line}</p>
     {div(figs['pe_daily'], div_id='pe_daily')}
     {div(figs['pe_bar'])}
     <p class="note">Зелёная пунктирная линия на дневном графике — средний P/E 2016–2018
