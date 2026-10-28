@@ -29,26 +29,63 @@ EPS_REVISIONS = [
     ("2026-03-25", {"*": 670}),
     ("2026-06-04", {"*": 650}),
     ("2026-06-22", {"*": 625}),
-    ("2026-06-26", {"*": 590}),
+    ("2026-06-26", {2025: 620, 2026: 590, 2027: 615, 2028: 745}),  # таблица в ERP.xlsx
     ("2026-09-24", {2026: 595, 2027: 615, 2028: 745}),
     ("2026-10-01", {2026: 770, 2027: 670, 2028: 705}),
 ]
 
 
-def eps_for(d) -> float:
-    """Форвардный EPS, действовавший на дату d, для года этой даты."""
-    iso = d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
-    rev = EPS_REVISIONS[0][1]
-    for start, values in EPS_REVISIONS:
-        if start <= iso[:10]:
-            rev = values
-    year = int(iso[:4])
+def _iso(d) -> str:
+    return (d.isoformat() if hasattr(d, "isoformat") else str(d))[:10]
+
+
+def _active_rev(iso: str) -> tuple[str, dict]:
+    rev = EPS_REVISIONS[0]
+    for r in EPS_REVISIONS:
+        if r[0] <= iso:
+            rev = r
+    return rev
+
+
+def eps_year(d, year: int) -> float:
+    """Прогноз EPS на календарный год year, известный на дату d.
+
+    Значение "*" трактуется как прогноз на год даты наблюдения. Если в действующей
+    ревизии нет прогноза на year, берётся ближайшая более поздняя ревизия, где он есть:
+    с явным значением year или со значением "*", действующим в году year.
+    """
+    iso = _iso(d)
+    idx = EPS_REVISIONS.index(_active_rev(iso))
+    start, rev = EPS_REVISIONS[idx]
     if year in rev:
         return float(rev[year])
-    if "*" in rev:
+    if "*" in rev and year == int(iso[:4]):
         return float(rev["*"])
+    for j in range(idx, len(EPS_REVISIONS)):
+        s_j, r_j = EPS_REVISIONS[j]
+        if year in r_j:
+            return float(r_j[year])
+        nxt = EPS_REVISIONS[j + 1][0] if j + 1 < len(EPS_REVISIONS) else "9999-12-31"
+        if "*" in r_j and int(s_j[:4]) <= year and nxt > f"{year}-01-01":
+            return float(r_j["*"])
+    # нет данных на этот год — последний известный прогноз на ближайший год
     years = sorted(k for k in rev if isinstance(k, int))
-    return float(rev[max((y for y in years if y <= year), default=years[0])])
+    if years:
+        return float(rev[max((y for y in years if y <= year), default=years[0])])
+    return float(rev["*"])
+
+
+def eps_for(d) -> float:
+    """EPS на 12 месяцев вперёд на дату d.
+
+    Взвешенное среднее прогнозов на текущий и следующий год:
+    w = доля оставшихся дней текущего года, EPS_12m = w·EPS(y) + (1 − w)·EPS(y+1).
+    """
+    day = dt.date.fromisoformat(_iso(d))
+    y = day.year
+    ndays = (dt.date(y + 1, 1, 1) - dt.date(y, 1, 1)).days
+    w = (dt.date(y + 1, 1, 1) - day).days / ndays
+    return w * eps_year(day, y) + (1 - w) * eps_year(day, y + 1)
 
 
 def current_eps_forecast() -> dict:
@@ -315,11 +352,17 @@ def update_from_moex(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
 
 
 def rebuild_bars(daily: pd.DataFrame) -> None:
-    """Пересобирает квартальные срезы 2026+ и значение «Сейчас»."""
-    for path, col, keep in ((ERP_Q_CSV, "erp", r"\d{4}"), (PE_Q_CSV, "pe", r"\d{4}")):
+    """Годы с дневными данными (до 2026) — среднее по дням; 2026+ — кварталы; «Сейчас»."""
+    first_year = int(daily["date"].dt.year.min())
+    for path, col in ((ERP_Q_CSV, "erp"), (PE_Q_CSV, "pe")):
         old = pd.read_csv(path)
-        base = old[old["label"].astype(str).str.fullmatch(keep)]
+        lab = old["label"].astype(str)
+        base = old[lab.str.fullmatch(r"\d{4}")]
+        base = base[base["label"].astype(int) < first_year]
         bars = base.to_dict("records")
+        hist = daily[daily["date"].dt.year < 2026]
+        for y, g in hist.groupby(hist["date"].dt.year):
+            bars.append({"label": str(y), col: g[col].mean()})
         d = daily[daily["date"].dt.year >= 2026]
         for (y, q), g in d.groupby([d["date"].dt.year, d["date"].dt.quarter]):
             bars.append({"label": f"{q}К{str(y)[2:]}", col: g[col].mean()})
@@ -338,7 +381,7 @@ def fig_daily_erp(df: pd.DataFrame) -> go.Figure:
         x=df["date"], y=df["erp"] * 100, mode="lines", name="Форвардный ERP",
         line=dict(color=COL_ERP, width=2),
         hovertemplate="%{x|%d.%m.%Y}<br>ERP: %{y:.2f}%<extra></extra>"))
-    mean_hist = 8.92
+    mean_hist = hist_mean_erp()
     fig.add_hline(y=mean_hist, line=dict(color=COL_MEAN, width=1.2, dash="dash"))
     # вторая линия — медиана выбранного диапазона, пересчитывается в браузере
     med_all = float((df["erp"] * 100).median())
@@ -384,6 +427,11 @@ def fig_daily_pe(df: pd.DataFrame) -> go.Figure:
                            f'2016–2018: {PE_BENCH}</span>',
                            f"{med_all:.2f}", len(df)))
     return fig
+
+
+def hist_mean_erp() -> float:
+    """Среднее ERP по завершённым годам, % — та же база, что у столбчатого графика."""
+    return _bar_stats(pd.read_csv(ERP_Q_CSV), "erp")[0] * 100
 
 
 def _bar_stats(bars: pd.DataFrame, col: str):

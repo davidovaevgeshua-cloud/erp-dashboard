@@ -58,7 +58,7 @@ median_cfg = json.dumps([
     {"id": "erp_daily", "suffix": "%", "t": ts,
      "v": [round(v * 100, 6) for v in daily["erp"]],
      "base": f'<span style="color:{core.COL_MEAN}">— — Историческое среднее '
-             f'2014–2025: 8.92%</span>'},
+             f'2014–2025: {core.hist_mean_erp():.2f}%</span>'},
     {"id": "pe_daily", "suffix": "", "t": ts,
      "v": [round(v, 6) for v in daily["pe"]],
      "base": f'<span style="color:{core.COL_MED}">···· Средний P/E '
@@ -72,9 +72,11 @@ median_js = f"<script>\n{median_js}\n</script>"
 
 
 _fc = core.current_eps_forecast()
-eps_line = ("Прогноз EPS<sub>fwd</sub> с " + dt.date.fromisoformat(_fc["from"]).strftime("%d.%m.%Y") + ": "
+eps_line = ("EPS<sub>12м</sub> — прогноз на 12 месяцев вперёд: взвешенное среднее прогнозов "
+            "на текущий и следующий год по доле оставшихся дней года. Прогноз с "
+            + dt.date.fromisoformat(_fc["from"]).strftime("%d.%m.%Y") + ": "
             + ", ".join(f"{y} — {v}" for y, v in _fc["values"].items())
-            + f"; на последнюю дату в расчёте {core.eps_for(last_date.date()):.0f}.")
+            + f"; EPS<sub>12м</sub> на последнюю дату — {core.eps_for(last_date.date()):.0f}.")
 
 
 cards = [
@@ -128,12 +130,12 @@ html = f"""<!DOCTYPE html>
 
   <section>
     <h2>Раздел 1. Форвардный ERP</h2>
-    <p class="sub">ERP = EPS<sub>fwd</sub> / IMOEX − доходность ОФЗ 5Y. Таймфрейм сужается
+    <p class="sub">ERP = EPS<sub>12м</sub> / IMOEX − доходность ОФЗ 5Y, где EPS<sub>12м</sub> — прогноз прибыли индекса на 12 месяцев вперёд. Таймфрейм сужается
        кнопками, ползунком под графиком или выделением мышью;
        медиана пересчитывается по выбранному диапазону.</p>
     {div(figs['erp_daily'], first=True, div_id='erp_daily')}
     {div(figs['erp_bar'])}
-    <p class="note">Годы 2014–2025 — исторические значения; кварталы 2026 рассчитаны как
+    <p class="note">Годы 2014–2024 — исторические значения из ERP.xlsx; 2025 — среднее дневных значений на EPS<sub>12м</sub>; кварталы 2026 рассчитаны как
        среднее дневных значений; «Сейчас» — ERP на последнюю доступную дату.
        Среднее и медиана на столбчатом графике считаются только по завершённым
        годам 2014–2025. На дневном графике тёмная штрихпунктирная линия — медиана
@@ -142,7 +144,7 @@ html = f"""<!DOCTYPE html>
 
   <section>
     <h2>Раздел 2. P/E индекса</h2>
-    <p class="sub">P/E = IMOEX / EPS<sub>fwd</sub> — рассчитывается из тех же данных и
+    <p class="sub">P/E = IMOEX / EPS<sub>12м</sub> — рассчитывается из тех же данных и
        обновляется вместе с ERP. {eps_line}</p>
     {div(figs['pe_daily'], div_id='pe_daily')}
     {div(figs['pe_bar'])}
